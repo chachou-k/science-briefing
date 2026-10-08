@@ -1,0 +1,14 @@
+name: Science Briefing Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * 0'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test
+        run: echo "Science Briefing funktioniert!"
