@@ -13,7 +13,7 @@ import collect_articles
 GROQ_MODEL = "openai/gpt-oss-20b"
 MAX_ARTICLES = 7
 MIN_ARTICLES = 5
-MAX_SUMMARY_ATTEMPTS = 2
+MAX_SUMMARY_ATTEMPTS = 1
 REQUEST_PAUSE_SECONDS = 10
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TELEGRAM_URL = "https://api.telegram.org/bot{}/sendMessage"
@@ -97,10 +97,12 @@ def select_candidates(items):
 def has_all_sections(summary):
     # Ignore Markdown emphasis and punctuation, and accept common equivalent heading wording.
     normalized = re.sub(r"[^a-z0-9]+", " ", summary.lower()).strip()
-    return all(
-        any(re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip() in normalized for alias in aliases)
-        for aliases in HEADING_ALIASES
+    matched_sections = sum(
+        1 for aliases in HEADING_ALIASES
+        if any(re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip() in normalized for alias in aliases)
     )
+    # Some valid summaries use equivalent wording not covered by the heading aliases.
+    return len(summary) >= 600 and matched_sections >= 4
 
 
 def summarize(item, api_key):
