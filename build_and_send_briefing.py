@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Build a small weekly science digest using Groq's API and send it to Telegram.
-
-Safety choices: one fixed model, no paid-model fallback, at most seven requests,
-and fail closed on API/quota errors. Requires GROQ_API_KEY and Telegram secrets.
-"""
+"""Build a weekly science digest with validated summaries; never use a paid fallback."""
 import json
 import os
 import time
 from datetime import date, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
-from urllib.parse import urlencode
 
 import collect_articles
 
 GROQ_MODEL = "openai/gpt-oss-20b"
 MAX_ARTICLES = 7
 MIN_ARTICLES = 5
+MAX_SUMMARY_ATTEMPTS = 2
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TELEGRAM_URL = "https://api.telegram.org/bot{}/sendMessage"
+REQUIRED_HEADINGS = (
+    "why it matters",
+    "research question and method",
+    "main findings",
+    "what the evidence does and does not show",
+    "limitations",
+)
 
 
 def request_json(url, data=None, headers=None, timeout=45):
@@ -38,7 +41,7 @@ def request_json(url, data=None, headers=None, timeout=45):
 
 def collect_candidates():
     today = date.today()
-    start = today - timedelta(days=14)
+    start = today - timedelta(days=30)
     items = []
     for category, url in collect_articles.ARXIV_FEEDS.items():
         items.extend(collect_articles.get_arxiv(category, url))
@@ -48,7 +51,12 @@ def collect_candidates():
     for item in items:
         if item.get("url") and item.get("abstract"):
             deduped.setdefault(item["url"].lower(), item)
-    return sorted(deduped.values(), key=lambda x: x.get("date", ""), reverse=True)
+    # Prefer journal/publication records over explicit preprints, then newer papers.
+    def priority(item):
+        status = item.get("status", "").upper()
+        preprint = "PREPRINT" in status or "ARXIV" in item.get("source", "").upper()
+        return (1 if preprint else 0, item.get("date", ""))
+    return sorted(deduped.values(), key=priority, reverse=False)
 
 
 def category_group(category):
@@ -63,36 +71,50 @@ def category_group(category):
     return category
 
 
-def select_articles(items):
-    # Require an abstract and favour varied topics. Avoid flooding the digest with one feed.
+def select_candidates(items):
+    # Keep a larger reserve so incomplete summaries can be skipped and replaced.
     selected, counts = [], {}
     for item in items:
         group = category_group(item.get("category", ""))
-        if counts.get(group, 0) >= 2:
-            continue
         abstract = item.get("abstract", "").strip()
         if len(abstract) < 180:
             continue
+        if counts.get(group, 0) >= 3:
+            continue
         selected.append(item)
         counts[group] = counts.get(group, 0) + 1
-        if len(selected) >= MAX_ARTICLES:
+        if len(selected) >= 24:
             break
     if len(selected) < MIN_ARTICLES:
-        raise RuntimeError(f"Only found {len(selected)} candidates with useful abstracts; stopping rather than sending a weak digest.")
+        raise RuntimeError(f"Only found {len(selected)} candidates with useful abstracts; no digest sent.")
     return selected
 
 
+def has_all_sections(summary):
+    normalized = " ".join(summary.lower().split())
+    return all(heading in normalized for heading in REQUIRED_HEADINGS)
+
+
 def summarize(item, api_key):
-    prompt = f"""Write a careful, accessible English research briefing for a curious non-specialist.
-Use ONLY the information supplied below. Never invent sample sizes, statistics, methods, results, or limitations. If the abstract does not report a detail, say it is not stated in the abstract.
-Use these short headings:
+    last_problem = "missing required section"
+    for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
+        retry_note = ""
+        if attempt > 1:
+            retry_note = (
+                "\nYour previous answer was incomplete. Rewrite the WHOLE summary and include "
+                "all five exact headings. Do not omit any section.\n"
+            )
+        prompt = f"""Write a detailed but accessible English research briefing for an interested non-specialist.
+Aim for 190-240 words total, excluding title and link. Explain technical terms in plain English when first used. Explain what the researchers actually did, not just the topic. Include sample size, time period, comparison group, numerical results, or effect sizes when stated in the abstract. Do not invent any details. If information is absent, say "Not reported in the abstract." Distinguish results from interpretation, and correlation from causation. Explain what cannot be concluded. Be specific about limitations supported by the supplied information; if the abstract gives no limitations, say so rather than inventing them.
+Use ALL five exact headings below, each on its own line:
 Why it matters
 Research question and method
-Main findings (include numbers/sample sizes/effect sizes only when provided)
+Main findings
 What the evidence does and does not show
 Limitations
-Aim for 120-170 words total. Distinguish findings from interpretation and avoid causal claims unless the study supports them. If this is a preprint, explicitly say it has not necessarily been peer reviewed.
-
+For "Research question and method", explain technical methods in simple language. For "Main findings", give concrete results and numbers when available. For "What the evidence does and does not show", separate the direct result from broader interpretations. For "Limitations", note missing details, design constraints, generalisability, and uncertainty only where justified.
+If this is a preprint, clearly state that it has not necessarily been peer reviewed. If it is a journal publication record, do not claim peer review is confirmed unless the metadata confirms it.
+{retry_note}
 Category: {item.get('category', 'Science')}
 Title: {item.get('title', '')}
 Date: {item.get('date', 'not supplied')}
@@ -101,23 +123,31 @@ Source: {item.get('source', '')}
 Abstract:
 {item.get('abstract', '')[:7000]}
 """
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a cautious science editor. Be accurate, readable, and transparent about uncertainty."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 650,
-    }
-    result = request_json(GROQ_URL, payload, {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    })
-    try:
-        return result["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("Groq returned an unexpected response; stopping without sending a digest.") from exc
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "You are a cautious science editor. Produce complete, plain-English summaries and never fabricate research details."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1000,
+        }
+        result = request_json(GROQ_URL, payload, {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        })
+        try:
+            summary = result["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Groq returned an unexpected response; no digest sent.") from exc
+        if has_all_sections(summary):
+            return summary
+        last_problem = "one or more required headings were missing"
+        print(f"Incomplete summary for '{item.get('title', '')}' (attempt {attempt}); " +
+              ("retrying." if attempt < MAX_SUMMARY_ATTEMPTS else "skipping article."))
+        time.sleep(1)
+    print(f"Skipped article because summary remained incomplete: {last_problem}.")
+    return None
 
 
 def telegram_send(token, chat_id, text):
@@ -137,19 +167,28 @@ def main():
     if not api_key or not telegram_token or not chat_id:
         raise RuntimeError("Missing GROQ_API_KEY, TELEGRAM_BOT_TOKEN, or TELEGRAM_CHAT_ID secret.")
 
-    articles = select_articles(collect_candidates())
-    print(f"Selected {len(articles)} candidates. Summarizing with fixed model {GROQ_MODEL}.")
+    candidates = select_candidates(collect_candidates())
+    print(f"Collected {len(candidates)} candidates. Summarizing with fixed model {GROQ_MODEL}.")
     summaries = []
-    for i, item in enumerate(articles, 1):
-        print(f"Summarizing article {i}/{len(articles)}")
+    for item in candidates:
+        if len(summaries) >= MAX_ARTICLES:
+            break
+        print(f"Summarizing candidate {len(summaries) + 1}; valid summaries so far: {len(summaries)}")
         summary = summarize(item, api_key)
-        summaries.append((item, summary))
+        if summary:
+            summaries.append((item, summary))
         time.sleep(1)
 
-    # Send only after every summary succeeded, so quota/API failures don't yield a half-written digest.
+    if len(summaries) < MIN_ARTICLES:
+        raise RuntimeError(
+            f"Only {len(summaries)} complete summaries could be produced; no Telegram digest sent. "
+            "This prevents incomplete article messages."
+        )
+
     telegram_send(telegram_token, chat_id,
         f"SCIENCE BRIEFING — {date.today().isoformat()}\n"
-        f"{len(summaries)} research stories from the last 14 days. Summaries are based on abstracts; follow the original links for full details.")
+        f"{len(summaries)} research stories from the last 30 days. Published records are prioritised; "
+        "preprints are labelled. Summaries are based on abstracts, so follow the original links for full details.")
     for i, (item, summary) in enumerate(summaries, 1):
         message = (
             f"{i}. [{category_group(item.get('category', 'Science'))}] {item.get('title', '')}\n"
@@ -157,12 +196,11 @@ def main():
             f"Evidence status: {item.get('status', 'not verified')}\n\n"
             f"{summary}\n\nOriginal paper: {item.get('url', '')}"
         )
-        # Telegram message limit is 4096 characters; trim only if the model unexpectedly exceeds it.
         if len(message) > 3900:
-            message = message[:3850] + "\n\n[Trimmed to fit Telegram.]\n" + item.get("url", "")
+            raise RuntimeError(f"Summary for article {i} is too long for Telegram; no more messages sent.")
         telegram_send(telegram_token, chat_id, message)
         time.sleep(1)
-    print("Science briefing sent to Telegram.")
+    print(f"Science briefing sent to Telegram with {len(summaries)} complete summaries.")
 
 
 if __name__ == "__main__":
