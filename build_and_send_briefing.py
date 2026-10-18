@@ -52,11 +52,12 @@ def collect_candidates():
         if item.get("url") and item.get("abstract"):
             deduped.setdefault(item["url"].lower(), item)
     # Prefer journal/publication records over explicit preprints, then newer papers.
-    def priority(item):
+    def is_preprint(item):
         status = item.get("status", "").upper()
-        preprint = "PREPRINT" in status or "ARXIV" in item.get("source", "").upper()
-        return (1 if preprint else 0, item.get("date", ""))
-    return sorted(deduped.values(), key=priority, reverse=False)
+        return "PREPRINT" in status or "ARXIV" in item.get("source", "").upper()
+    newest_first = sorted(deduped.values(), key=lambda x: x.get("date", ""), reverse=True)
+    # Stable second sort puts publication records first while preserving newest-first order within each group.
+    return sorted(newest_first, key=lambda item: 1 if is_preprint(item) else 0)
 
 
 def category_group(category):
