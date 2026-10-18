@@ -109,7 +109,7 @@ def rank_candidates(items, api_key):
             "title": item.get("title", ""),
             "date": item.get("date", ""),
             "status": item.get("status", ""),
-            "abstract": item.get("abstract", "")[:1400],
+            "abstract": item.get("abstract", "")[:900],
         })
 
     prompt = """Act as a cautious science-news editor choosing a varied weekly briefing for an intellectually curious general reader.
