@@ -94,8 +94,9 @@ def select_candidates(items):
     return selected
 
 
+
 def rank_candidates(items, api_key):
-    """Rank a small candidate pool using explicit, evidence-aware editorial criteria."""
+    """Rank candidates using explicit, evidence-aware editorial criteria."""
     candidates = items[:24]
     if len(candidates) < MIN_ARTICLES:
         raise RuntimeError(f"Only {len(candidates)} candidates available to rank; no digest sent.")
@@ -124,67 +125,78 @@ Return ONLY valid JSON in this exact shape:
 {"ranked":[{"id":0,"methodological_strength":0,"evidence_value":0,"novelty":0,"broad_interest":0,"abstract_clarity":0,"reason":"brief evidence-based reason"}]}
 Include every candidate id exactly once, best overall first. Keep each reason under 18 words.
 Candidates:
-""" + JSON.stringify(records);
+""" + json.dumps(records, ensure_ascii=False)
 
-    const payload = {
-        model: GROQ_MODEL,
-        messages: [
-            {role: "system", content: "You are a careful, conservative science editor. Follow the requested JSON format and do not invent details."},
-            {role: "user", content: prompt}
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a careful, conservative science editor. Follow the requested JSON format and do not invent details."},
+            {"role": "user", "content": prompt},
         ],
-        temperature: 0.1,
-        max_tokens: 1800,
-        response_format: {type: "json_object"}
-    };
-    const result = request_json(GROQ_URL, payload, {
-        "Authorization": `Bearer ${api_key}`,
-        "Content-Type": "application/json"
-    });
-    let parsed;
-    try {
-        parsed = JSON.parse(result.choices[0].message.content);
-    } catch (exc) {
-        throw new RuntimeError("Candidate-ranking response was not valid JSON; no digest sent.");
+        "temperature": 0.1,
+        "max_tokens": 1800,
+        "response_format": {"type": "json_object"},
     }
-    if (!Array.isArray(parsed.ranked)) {
-        throw new RuntimeError("Candidate-ranking response had an unexpected format; no digest sent.");
-    }
+    result = request_json(GROQ_URL, payload, {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    })
+    try:
+        parsed = json.loads(result["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Candidate-ranking response was not valid JSON; no digest sent.") from exc
+    if not isinstance(parsed.get("ranked"), list):
+        raise RuntimeError("Candidate-ranking response had an unexpected format; no digest sent.")
 
-    const byId = new Map(candidates.map((item, id) => [id, item]));
-    const scored = [];
-    for (const row of parsed.ranked) {
-        const item = byId.get(row.id);
-        if (!item || scored.some(entry => entry.item === item)) continue;
-        const values = ["methodological_strength", "evidence_value", "novelty", "broad_interest", "abstract_clarity"];
-        if (!values.every(key => Number.isFinite(row[key]) && row[key] >= 0 && row[key] <= 5)) continue;
-        const score =
-            row.methodological_strength * 0.25 +
-            row.evidence_value * 0.25 +
-            row.novelty * 0.15 +
-            row.broad_interest * 0.20 +
-            row.abstract_clarity * 0.15;
-        scored.push({item, score, reason: String(row.reason || "")});
-    }
-    if (scored.length < MIN_ARTICLES) {
-        throw new RuntimeError("Too few valid candidate scores; no digest sent.");
-    }
+    scored, seen_ids = [], set()
+    score_keys = (
+        "methodological_strength", "evidence_value", "novelty",
+        "broad_interest", "abstract_clarity",
+    )
+    for row in parsed["ranked"]:
+        if not isinstance(row, dict):
+            continue
+        idx = row.get("id")
+        if not isinstance(idx, int) or idx < 0 or idx >= len(candidates) or idx in seen_ids:
+            continue
+        values = [row.get(key) for key in score_keys]
+        if not all(isinstance(value, (int, float)) and 0 <= value <= 5 for value in values):
+            continue
+        seen_ids.add(idx)
+        score = (
+            row["methodological_strength"] * 0.25
+            + row["evidence_value"] * 0.25
+            + row["novelty"] * 0.15
+            + row["broad_interest"] * 0.20
+            + row["abstract_clarity"] * 0.15
+        )
+        scored.append({
+            "item": candidates[idx],
+            "score": score,
+            "reason": str(row.get("reason", "")),
+        })
 
-    // Greedy diversity pass: avoid allowing one subject to dominate the final seven.
-    const ordered = [];
-    const remaining = [...scored].sort((a, b) => b.score - a.score);
-    while (remaining.length) {
-        let index = remaining.findIndex(entry =>
-            ordered.filter(done => category_group(done.item.get("category", "")) === category_group(entry.item.get("category", ""))).length < 2
-        );
-        if (index < 0) index = 0;
-        ordered.push(remaining.splice(index, 1)[0]);
-    }
-    console.log("Candidate ranking complete. Top scores: " + ordered.slice(0, 10).map(entry =>
-        category_group(entry.item.get("category", "")) + " (" + entry.score.toFixed(2) + ")"
-    ).join("; "));
-    return ordered.map(entry => entry.item);
-}
+    if len(scored) < MIN_ARTICLES:
+        raise RuntimeError("Too few valid candidate scores; no digest sent.")
 
+    # Greedy diversity pass: avoid allowing one subject to dominate the final seven.
+    ordered, remaining = [], sorted(scored, key=lambda entry: entry["score"], reverse=True)
+    while remaining:
+        index = next((
+            i for i, entry in enumerate(remaining)
+            if sum(
+                1 for done in ordered
+                if category_group(done["item"].get("category", "")) ==
+                   category_group(entry["item"].get("category", ""))
+            ) < 2
+        ), 0)
+        ordered.append(remaining.pop(index))
+
+    print("Candidate ranking complete. Top scores: " + "; ".join(
+        f"{category_group(entry['item'].get('category', ''))} ({entry['score']:.2f})"
+        for entry in ordered[:10]
+    ))
+    return [entry["item"] for entry in ordered]
 
 def has_all_sections(summary):
     # Reasoning models can spend part of the output budget before the final text.
