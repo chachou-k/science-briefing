@@ -2,6 +2,7 @@
 """Build a weekly science digest with validated summaries; never use a paid fallback."""
 import json
 import os
+import re
 import time
 from datetime import date, timedelta
 from urllib.request import Request, urlopen
@@ -13,14 +14,16 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 MAX_ARTICLES = 7
 MIN_ARTICLES = 5
 MAX_SUMMARY_ATTEMPTS = 2
+REQUEST_PAUSE_SECONDS = 10
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 TELEGRAM_URL = "https://api.telegram.org/bot{}/sendMessage"
-REQUIRED_HEADINGS = (
-    "why it matters",
-    "research question and method",
-    "main findings",
-    "what the evidence does and does not show",
-    "limitations",
+HEADING_ALIASES = (
+    ("why it matters", "why this matters", "importance"),
+    ("research question and method", "research question and methods", "question and method", "question and methods"),
+    ("main findings", "key findings", "findings"),
+    ("what the evidence does and does not show", "what the evidence does and doesnt show",
+     "what the evidence can and cannot show", "evidence and interpretation", "what we can conclude"),
+    ("limitations", "caveats", "limitations and caveats"),
 )
 
 
@@ -92,8 +95,12 @@ def select_candidates(items):
 
 
 def has_all_sections(summary):
-    normalized = " ".join(summary.lower().split())
-    return all(heading in normalized for heading in REQUIRED_HEADINGS)
+    # Ignore Markdown emphasis and punctuation, and accept common equivalent heading wording.
+    normalized = re.sub(r"[^a-z0-9]+", " ", summary.lower()).strip()
+    return all(
+        any(re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip() in normalized for alias in aliases)
+        for aliases in HEADING_ALIASES
+    )
 
 
 def summarize(item, api_key):
@@ -106,7 +113,7 @@ def summarize(item, api_key):
                 "all five exact headings. Do not omit any section.\n"
             )
         prompt = f"""Write a detailed but accessible English research briefing for an interested non-specialist.
-Aim for 190-240 words total, excluding title and link. Explain technical terms in plain English when first used. Explain what the researchers actually did, not just the topic. Include sample size, time period, comparison group, numerical results, or effect sizes when stated in the abstract. Do not invent any details. If information is absent, say "Not reported in the abstract." Distinguish results from interpretation, and correlation from causation. Explain what cannot be concluded. Be specific about limitations supported by the supplied information; if the abstract gives no limitations, say so rather than inventing them.
+Aim for 180-220 words total, excluding title and link. Explain technical terms in plain English when first used. Explain what the researchers actually did, not just the topic. Include sample size, time period, comparison group, numerical results, or effect sizes when stated in the abstract. Do not invent any details. If information is absent, say "Not reported in the abstract." Distinguish results from interpretation, and correlation from causation. Explain what cannot be concluded. Be specific about limitations supported by the supplied information; if the abstract gives no limitations, say so rather than inventing them.
 Use ALL five exact headings below, each on its own line:
 Why it matters
 Research question and method
@@ -122,7 +129,7 @@ Date: {item.get('date', 'not supplied')}
 Evidence status: {item.get('status', 'status not verified')}
 Source: {item.get('source', '')}
 Abstract:
-{item.get('abstract', '')[:7000]}
+{item.get('abstract', '')[:5000]}
 """
         payload = {
             "model": GROQ_MODEL,
@@ -131,7 +138,7 @@ Abstract:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 1000,
+            "max_tokens": 700,
         }
         result = request_json(GROQ_URL, payload, {
             "Authorization": f"Bearer {api_key}",
@@ -146,7 +153,7 @@ Abstract:
         last_problem = "one or more required headings were missing"
         print(f"Incomplete summary for '{item.get('title', '')}' (attempt {attempt}); " +
               ("retrying." if attempt < MAX_SUMMARY_ATTEMPTS else "skipping article."))
-        time.sleep(1)
+        time.sleep(REQUEST_PAUSE_SECONDS)
     print(f"Skipped article because summary remained incomplete: {last_problem}.")
     return None
 
@@ -178,7 +185,7 @@ def main():
         summary = summarize(item, api_key)
         if summary:
             summaries.append((item, summary))
-        time.sleep(1)
+        time.sleep(REQUEST_PAUSE_SECONDS)
 
     if len(summaries) < MIN_ARTICLES:
         raise RuntimeError(
