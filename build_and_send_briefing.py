@@ -23,7 +23,9 @@ TELEGRAM_URL = "https://api.telegram.org/bot{}/sendMessage"
 
 def request_json(url, data=None, headers=None, timeout=45):
     body = json.dumps(data).encode("utf-8") if data is not None else None
-    req = Request(url, data=body, headers=headers or {}, method="POST" if body else "GET")
+    safe_headers = {"User-Agent": "ScienceBriefingBot/0.1 (personal research digest)"}
+    safe_headers.update(headers or {})
+    req = Request(url, data=body, headers=safe_headers, method="POST" if body else "GET")
     try:
         with urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
