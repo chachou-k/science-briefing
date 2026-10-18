@@ -36,7 +36,7 @@ def fetch(url):
         return response.read()
 
 def clean(text):
-    return re.sub(r"\\s+", " ", (text or "")).strip()
+    return re.sub(r"\s+", " ", (text or "")).strip()
 
 def get_arxiv(category, url):
     items = []
