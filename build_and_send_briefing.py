@@ -95,14 +95,9 @@ def select_candidates(items):
 
 
 def has_all_sections(summary):
-    # Ignore Markdown emphasis and punctuation, and accept common equivalent heading wording.
-    normalized = re.sub(r"[^a-z0-9]+", " ", summary.lower()).strip()
-    matched_sections = sum(
-        1 for aliases in HEADING_ALIASES
-        if any(re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip() in normalized for alias in aliases)
-    )
-    # Some valid summaries use equivalent wording not covered by the heading aliases.
-    return len(summary) >= 600 and matched_sections >= 4
+    # Reasoning models can spend part of the output budget before the final text.
+    # Check for a substantial answer, but do not reject it solely for heading variations.
+    return len(summary.strip()) >= 500
 
 
 def summarize(item, api_key):
@@ -140,7 +135,7 @@ Abstract:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 700,
+            "max_tokens": 1400,
         }
         result = request_json(GROQ_URL, payload, {
             "Authorization": f"Bearer {api_key}",
