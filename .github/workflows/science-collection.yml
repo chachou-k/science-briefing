@@ -1,18 +1,18 @@
-name: Collect Science Articles
+name: Weekly Science Briefing
 
 on:
   workflow_dispatch:
   schedule:
-    # Sundays at 08:00 UTC (09:00 in German winter time, 10:00 in summer time)
+    # Sundays at 08:00 UTC (09:00 German winter time, 10:00 summer time)
     - cron: "0 8 * * 0"
 
 permissions:
   contents: read
 
 jobs:
-  collect:
+  briefing:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,5 +20,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Collect recent article candidates
-        run: python collect_articles.py
+      - name: Build and send weekly briefing
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python build_and_send_briefing.py
