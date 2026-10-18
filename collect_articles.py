@@ -43,17 +43,32 @@ def get_arxiv(category, url):
     try:
         root = ET.fromstring(fetch(url))
         ns = {"atom": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("atom:entry", ns)[:MAX_PER_SOURCE]:
-            title = clean(entry.findtext("atom:title", default="", namespaces=ns))
-            link = entry.findtext("atom:id", default="", namespaces=ns)
-            published = clean(entry.findtext("atom:published", default="", namespaces=ns))[:10]
-            summary = clean(entry.findtext("atom:summary", default="", namespaces=ns))
-            if title and link:
-                items.append({
-                    "category": category, "title": title, "url": link,
-                    "date": published, "source": "arXiv preprint",
-                    "abstract": summary, "status": "PREPRINT — not necessarily peer-reviewed",
-                })
+        # arXiv feeds may be Atom or RSS depending on endpoint/version.
+        entries = root.findall("atom:entry", ns)
+        if entries:
+            for entry in entries[:MAX_PER_SOURCE]:
+                title = clean(entry.findtext("atom:title", default="", namespaces=ns))
+                link = entry.findtext("atom:id", default="", namespaces=ns)
+                published = clean(entry.findtext("atom:published", default="", namespaces=ns))[:10]
+                summary = clean(entry.findtext("atom:summary", default="", namespaces=ns))
+                if title and link:
+                    items.append({
+                        "category": category, "title": title, "url": link,
+                        "date": published, "source": "arXiv preprint",
+                        "abstract": summary, "status": "PREPRINT — not necessarily peer-reviewed",
+                    })
+        else:
+            for entry in root.findall("./channel/item")[:MAX_PER_SOURCE]:
+                title = clean(entry.findtext("title", default=""))
+                link = clean(entry.findtext("link", default=""))
+                published = clean(entry.findtext("pubDate", default=""))[:16]
+                summary = clean(entry.findtext("description", default=""))
+                if title and link:
+                    items.append({
+                        "category": category, "title": title, "url": link,
+                        "date": published, "source": "arXiv preprint",
+                        "abstract": summary, "status": "PREPRINT — not necessarily peer-reviewed",
+                    })
     except Exception as exc:
         print(f"WARNING: arXiv feed failed ({category}): {exc}")
     return items
